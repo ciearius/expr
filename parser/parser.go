@@ -336,8 +336,6 @@ func (p *parser) parsePrimaryExpression() Node {
 						p.error("%s does not exist in builtin namespace %s", p.current.Value, b.Namespace)
 					}
 				}
-
-				return node
 			}
 		}
 
