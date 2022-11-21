@@ -23,8 +23,51 @@ type operator struct {
 	associativity associativity
 }
 
+type arg int
+
+const (
+	expression arg = iota
+	closure
+)
+
 type builtin struct {
-	arity int
+	args []arg
+}
+
+var (
+	arg_expression             = []arg{expression}
+	arg_expression_and_closure = []arg{expression, closure}
+)
+
+type namespace struct {
+	name    string
+	members map[string]builtin
+}
+
+var standard_namespace = namespace{
+	"",
+	map[string]builtin{
+		"len":    {args: arg_expression},
+		"all":    {args: arg_expression_and_closure},
+		"none":   {args: arg_expression_and_closure},
+		"any":    {args: arg_expression_and_closure},
+		"one":    {args: arg_expression_and_closure},
+		"filter": {args: arg_expression_and_closure},
+		"map":    {args: arg_expression_and_closure},
+		"count":  {args: arg_expression_and_closure},
+	},
+}
+
+var math_namespace = namespace{
+	"math",
+	map[string]builtin{
+		"abs": {args: arg_expression},
+	},
+}
+
+var namespaces = map[string]namespace{
+	standard_namespace.name: standard_namespace,
+	math_namespace.name:     math_namespace,
 }
 
 var unaryOperators = map[string]operator{
@@ -58,17 +101,6 @@ var binaryOperators = map[string]operator{
 	"%":          {60, left},
 	"**":         {100, right},
 	"^":          {100, right},
-}
-
-var builtins = map[string]builtin{
-	"len":    {1},
-	"all":    {2},
-	"none":   {2},
-	"any":    {2},
-	"one":    {2},
-	"filter": {2},
-	"map":    {2},
-	"count":  {2},
 }
 
 type parser struct {
@@ -284,6 +316,29 @@ func (p *parser) parsePrimaryExpression() Node {
 			return node
 		default:
 			node = p.parseIdentifierExpression(token)
+
+			if b, ok := node.(*BuiltinNode); ok {
+				// At this point in time all builtin functions seem to be on the first level of their namespace.
+				if b.Name == "" {
+					p.expect(Operator, ".")
+
+					if !p.current.Is(Identifier) {
+						p.error("missing identifier after top level namespace %s", b.Namespace)
+					}
+
+					b.Name = p.current.Value
+					p.next()
+
+					// TODO: names of builtin namespaces are now blocked for everything else!
+					if callee, ok := namespaces[b.Namespace].members[b.Name]; ok {
+						b.Arguments = p.parseArgumentsBuiltin(callee)
+					} else {
+						p.error("%s does not exist in builtin namespace %s", p.current.Value, b.Namespace)
+					}
+				}
+
+				return node
+			}
 		}
 
 	case Number:
@@ -336,41 +391,44 @@ func (p *parser) parsePrimaryExpression() Node {
 
 func (p *parser) parseIdentifierExpression(token Token) Node {
 	var node Node
+
 	if p.current.Is(Bracket, "(") {
-		var arguments []Node
-
-		if b, ok := builtins[token.Value]; ok {
-			p.expect(Bracket, "(")
-			// TODO: Add builtins signatures.
-			if b.arity == 1 {
-				arguments = make([]Node, 1)
-				arguments[0] = p.parseExpression(0)
-			} else if b.arity == 2 {
-				arguments = make([]Node, 2)
-				arguments[0] = p.parseExpression(0)
-				p.expect(Operator, ",")
-				arguments[1] = p.parseClosure()
-			}
-			p.expect(Bracket, ")")
-
-			node = &BuiltinNode{
-				Name:      token.Value,
-				Arguments: arguments,
-			}
-			node.SetLocation(token.Location)
-		} else {
-			callee := &IdentifierNode{Value: token.Value}
-			callee.SetLocation(token.Location)
-			node = &CallNode{
-				Callee:    callee,
-				Arguments: p.parseArguments(),
-			}
-			node.SetLocation(token.Location)
-		}
+		// top level call (could be builtin from standard namespace)
+		node = p.parseTopLevelCall(token)
+	} else if space, ok := namespaces[token.Value]; ok {
+		// builtin outside standard namespace
+		node = &BuiltinNode{Namespace: space.name}
 	} else {
+		// arbitrary identifier
 		node = &IdentifierNode{Value: token.Value}
-		node.SetLocation(token.Location)
 	}
+
+	node.SetLocation(token.Location)
+
+	return node
+}
+
+func (p *parser) parseTopLevelCall(token Token) Node {
+	var node Node
+
+	if b, ok := namespaces[""].members[token.Value]; ok {
+
+		node = &BuiltinNode{
+			Name:      token.Value,
+			Arguments: p.parseArgumentsBuiltin(b),
+		}
+
+		return node
+	}
+
+	callee := &IdentifierNode{Value: token.Value}
+	callee.SetLocation(token.Location)
+
+	node = &CallNode{
+		Callee:    callee,
+		Arguments: p.parseArguments(),
+	}
+
 	return node
 }
 
@@ -590,4 +648,28 @@ func (p *parser) parseArguments() []Node {
 	p.expect(Bracket, ")")
 
 	return nodes
+}
+
+func (p *parser) parseArgumentsBuiltin(b builtin) []Node {
+	arguments := make([]Node, len(b.args))
+	lastIndex := len(b.args) - 1
+
+	p.expect(Bracket, "(")
+
+	for i, t := range b.args {
+		switch t {
+		case expression:
+			arguments[i] = p.parseExpression(0)
+		case closure:
+			arguments[i] = p.parseClosure()
+		}
+
+		if i != lastIndex {
+			p.expect(Operator, ",")
+		}
+	}
+
+	p.expect(Bracket, ")")
+
+	return arguments
 }
