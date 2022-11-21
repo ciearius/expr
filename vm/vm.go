@@ -4,6 +4,7 @@ package vm
 
 import (
 	"fmt"
+	"math"
 	"reflect"
 	"regexp"
 	"strings"
@@ -392,6 +393,10 @@ func (vm *VM) Run(program *Program, env interface{}) (out interface{}, err error
 				Array: array,
 				Len:   array.Len(),
 			})
+
+		case OpAbs:
+			c := vm.current()
+			vm.push(math.Abs(runtime.ToFloat64(c)))
 
 		case OpEnd:
 			vm.scopes = vm.scopes[:len(vm.scopes)-1]

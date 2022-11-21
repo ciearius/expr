@@ -528,6 +528,18 @@ func (c *compiler) CallNode(node *ast.CallNode) {
 }
 
 func (c *compiler) BuiltinNode(node *ast.BuiltinNode) {
+
+	if node.Namespace == "" {
+		c.namespaceStandard(node)
+	} else if node.Namespace == "math" {
+		c.namespaceMath(node)
+	} else {
+		panic(fmt.Sprintf("unknown builtin %v", node.Name))
+	}
+
+}
+
+func (c *compiler) namespaceStandard(node *ast.BuiltinNode) {
 	switch node.Name {
 	case "len":
 		c.compile(node.Arguments[0])
@@ -624,6 +636,20 @@ func (c *compiler) BuiltinNode(node *ast.BuiltinNode) {
 		})
 		c.emit(OpGetCount)
 		c.emit(OpEnd)
+
+	default:
+		panic(fmt.Sprintf("unknown builtin %v", node.Name))
+	}
+}
+
+func (c *compiler) namespaceMath(node *ast.BuiltinNode) {
+	switch node.Name {
+
+	case "abs":
+		c.compile(node.Arguments[0])
+		c.emit(OpAbs)
+		c.emit(OpRot)
+		c.emit(OpPop)
 
 	default:
 		panic(fmt.Sprintf("unknown builtin %v", node.Name))

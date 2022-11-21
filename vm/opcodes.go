@@ -60,5 +60,6 @@ const (
 	OpGetLen
 	OpPointer
 	OpBegin
+	OpAbs // namespace math
 	OpEnd // This opcode must be at the end of this list.
 )
