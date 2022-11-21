@@ -128,6 +128,7 @@ type CallNode struct {
 
 type BuiltinNode struct {
 	base
+	Namespace string
 	Name      string
 	Arguments []Node
 }
