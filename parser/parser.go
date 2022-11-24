@@ -7,8 +7,11 @@ import (
 	"unicode/utf8"
 
 	. "github.com/antonmedv/expr/ast"
+	"github.com/antonmedv/expr/builtin"
 	"github.com/antonmedv/expr/file"
+	"github.com/antonmedv/expr/namespaces"
 	. "github.com/antonmedv/expr/parser/lexer"
+	"github.com/antonmedv/expr/util/typing"
 )
 
 type associativity int
@@ -30,45 +33,10 @@ const (
 	closure
 )
 
-type builtin struct {
-	args []arg
-}
-
 var (
 	arg_expression             = []arg{expression}
 	arg_expression_and_closure = []arg{expression, closure}
 )
-
-type namespace struct {
-	name    string
-	members map[string]builtin
-}
-
-var standard_namespace = namespace{
-	"",
-	map[string]builtin{
-		"len":    {args: arg_expression},
-		"all":    {args: arg_expression_and_closure},
-		"none":   {args: arg_expression_and_closure},
-		"any":    {args: arg_expression_and_closure},
-		"one":    {args: arg_expression_and_closure},
-		"filter": {args: arg_expression_and_closure},
-		"map":    {args: arg_expression_and_closure},
-		"count":  {args: arg_expression_and_closure},
-	},
-}
-
-var math_namespace = namespace{
-	"math",
-	map[string]builtin{
-		"abs": {args: arg_expression},
-	},
-}
-
-var namespaces = map[string]namespace{
-	standard_namespace.name: standard_namespace,
-	math_namespace.name:     math_namespace,
-}
 
 var unaryOperators = map[string]operator{
 	"not": {50, left},
@@ -330,10 +298,14 @@ func (p *parser) parsePrimaryExpression() Node {
 					p.next()
 
 					// TODO: names of builtin namespaces are now blocked for everything else!
-					if callee, ok := namespaces[b.Namespace].members[b.Name]; ok {
-						b.Arguments = p.parseArgumentsBuiltin(callee)
+					if namespace, ok := namespaces.Get(b.Namespace); ok {
+						if callee, ok := namespace.Get(b.Name); ok {
+							b.Arguments = p.parseArgumentsBuiltin(callee)
+						} else {
+							p.error("%s does not exist in builtin namespace %s", b.Name, b.Namespace)
+						}
 					} else {
-						p.error("%s does not exist in builtin namespace %s", p.current.Value, b.Namespace)
+						p.error("builtin namespace %s does not exist (member %s mentioned)", b.Namespace, b.Name)
 					}
 				}
 			}
@@ -393,9 +365,9 @@ func (p *parser) parseIdentifierExpression(token Token) Node {
 	if p.current.Is(Bracket, "(") {
 		// top level call (could be builtin from standard namespace)
 		node = p.parseTopLevelCall(token)
-	} else if space, ok := namespaces[token.Value]; ok {
+	} else if _, ok := namespaces.Get(token.Value); ok {
 		// builtin outside standard namespace
-		node = &BuiltinNode{Namespace: space.name}
+		node = &BuiltinNode{Namespace: token.Value}
 	} else {
 		// arbitrary identifier
 		node = &IdentifierNode{Value: token.Value}
@@ -409,7 +381,7 @@ func (p *parser) parseIdentifierExpression(token Token) Node {
 func (p *parser) parseTopLevelCall(token Token) Node {
 	var node Node
 
-	if b, ok := namespaces[""].members[token.Value]; ok {
+	if b, ok := namespaces.Stdlib.Get(token.Value); ok {
 
 		node = &BuiltinNode{
 			Name:      token.Value,
@@ -648,17 +620,28 @@ func (p *parser) parseArguments() []Node {
 	return nodes
 }
 
-func (p *parser) parseArgumentsBuiltin(b builtin) []Node {
-	arguments := make([]Node, len(b.args))
-	lastIndex := len(b.args) - 1
+func (p *parser) parseArgumentsBuiltin(member builtin.Member) []Node {
+	if !member.Callable() {
+		return nil
+	}
+
+	function, isFunction := member.(builtin.Function)
+
+	if !isFunction {
+		panic("internal member " + typing.Name(member) + " illegally declared invokable")
+	}
+
+	argMask := builtin.ParserArguments(function)
+	arguments := make([]Node, len(argMask))
+	lastIndex := len(argMask) - 1
 
 	p.expect(Bracket, "(")
 
-	for i, t := range b.args {
+	for i, t := range argMask {
 		switch t {
-		case expression:
+		case builtin.Expression:
 			arguments[i] = p.parseExpression(0)
-		case closure:
+		case builtin.Closure:
 			arguments[i] = p.parseClosure()
 		}
 

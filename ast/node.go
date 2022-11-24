@@ -133,6 +133,14 @@ type BuiltinNode struct {
 	Arguments []Node
 }
 
+func (b BuiltinNode) String() string {
+	if b.Namespace != "" {
+		return b.Namespace + "." + b.Name
+	}
+
+	return b.Name
+}
+
 type ClosureNode struct {
 	base
 	Node Node

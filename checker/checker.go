@@ -8,7 +8,11 @@ import (
 	"github.com/antonmedv/expr/ast"
 	"github.com/antonmedv/expr/conf"
 	"github.com/antonmedv/expr/file"
+	"github.com/antonmedv/expr/namespaces"
 	"github.com/antonmedv/expr/parser"
+	"github.com/antonmedv/expr/util/checking"
+	. "github.com/antonmedv/expr/util/checking"
+	. "github.com/antonmedv/expr/util/typing"
 	"github.com/antonmedv/expr/vm"
 )
 
@@ -17,11 +21,27 @@ func Check(tree *parser.Tree, config *conf.Config) (t reflect.Type, err error) {
 		config = conf.New(nil)
 	}
 
-	v := &visitor{
+	v := &CheckVisitor{
 		config:      config,
 		collections: make([]reflect.Type, 0),
 		parents:     make([]ast.Node, 0),
 	}
+
+	v.ex = checking.Create(
+		func(node ast.Node) (reflect.Type, checking.Info) {
+			return v.visit(node)
+		},
+		func(node ast.Node, format string, args ...interface{}) (reflect.Type, checking.Info) {
+			return v.error(node, format, args...)
+		},
+		func(collection reflect.Type) {
+			// v.collections = append(v.collections, collection)
+			v.collections = append(v.collections, collection)
+		}, func() {
+			// v.collections = v.collections[:len(v.collections)-1]
+			v.collections = v.collections[:len(v.collections)-1]
+		},
+	)
 
 	t, _ = v.visit(tree.Node)
 
@@ -32,7 +52,7 @@ func Check(tree *parser.Tree, config *conf.Config) (t reflect.Type, err error) {
 	if v.config.Expect != reflect.Invalid {
 		switch v.config.Expect {
 		case reflect.Int, reflect.Int64, reflect.Float64:
-			if !isNumber(t) {
+			if !IsNumber(t) {
 				return nil, fmt.Errorf("expected %v, but got %v", v.config.Expect, t)
 			}
 		default:
@@ -45,20 +65,17 @@ func Check(tree *parser.Tree, config *conf.Config) (t reflect.Type, err error) {
 	return t, nil
 }
 
-type visitor struct {
+type CheckVisitor struct {
 	config      *conf.Config
 	collections []reflect.Type
 	parents     []ast.Node
 	err         *file.Error
+	ex          *ExternVisitor
 }
 
-type info struct {
-	method bool
-}
-
-func (v *visitor) visit(node ast.Node) (reflect.Type, info) {
+func (v *CheckVisitor) visit(node ast.Node) (reflect.Type, Info) {
 	var t reflect.Type
-	var i info
+	var i Info
 	v.parents = append(v.parents, node)
 	switch n := node.(type) {
 	case *ast.NilNode:
@@ -109,84 +126,84 @@ func (v *visitor) visit(node ast.Node) (reflect.Type, info) {
 	return t, i
 }
 
-func (v *visitor) error(node ast.Node, format string, args ...interface{}) (reflect.Type, info) {
+func (v *CheckVisitor) error(node ast.Node, format string, args ...interface{}) (reflect.Type, Info) {
 	if v.err == nil { // show first error
 		v.err = &file.Error{
 			Location: node.Location(),
 			Message:  fmt.Sprintf(format, args...),
 		}
 	}
-	return anyType, info{} // interface represent undefined type
+	return AnyType, Info{} // interface represent undefined type
 }
 
-func (v *visitor) NilNode(*ast.NilNode) (reflect.Type, info) {
-	return nilType, info{}
+func (v *CheckVisitor) NilNode(*ast.NilNode) (reflect.Type, Info) {
+	return NilType, Info{}
 }
 
-func (v *visitor) IdentifierNode(node *ast.IdentifierNode) (reflect.Type, info) {
+func (v *CheckVisitor) IdentifierNode(node *ast.IdentifierNode) (reflect.Type, Info) {
 	if v.config.Types == nil {
 		node.Deref = true
-		return anyType, info{}
+		return AnyType, Info{}
 	}
 	if t, ok := v.config.Types[node.Value]; ok {
 		if t.Ambiguous {
 			return v.error(node, "ambiguous identifier %v", node.Value)
 		}
-		d, c := deref(t.Type)
+		d, c := Deref(t.Type)
 		node.Deref = c
 		node.Method = t.Method
 		node.MethodIndex = t.MethodIndex
 		node.FieldIndex = t.FieldIndex
-		return d, info{method: t.Method}
+		return d, Info{Method: t.Method}
 	}
 	if !v.config.Strict {
 		if v.config.DefaultType != nil {
-			return v.config.DefaultType, info{}
+			return v.config.DefaultType, Info{}
 		}
-		return anyType, info{}
+		return AnyType, Info{}
 	}
 	return v.error(node, "unknown name %v", node.Value)
 }
 
-func (v *visitor) IntegerNode(*ast.IntegerNode) (reflect.Type, info) {
-	return integerType, info{}
+func (v *CheckVisitor) IntegerNode(*ast.IntegerNode) (reflect.Type, Info) {
+	return IntegerType, Info{}
 }
 
-func (v *visitor) FloatNode(*ast.FloatNode) (reflect.Type, info) {
-	return floatType, info{}
+func (v *CheckVisitor) FloatNode(*ast.FloatNode) (reflect.Type, Info) {
+	return FloatType, Info{}
 }
 
-func (v *visitor) BoolNode(*ast.BoolNode) (reflect.Type, info) {
-	return boolType, info{}
+func (v *CheckVisitor) BoolNode(*ast.BoolNode) (reflect.Type, Info) {
+	return BoolType, Info{}
 }
 
-func (v *visitor) StringNode(*ast.StringNode) (reflect.Type, info) {
-	return stringType, info{}
+func (v *CheckVisitor) StringNode(*ast.StringNode) (reflect.Type, Info) {
+	return StringType, Info{}
 }
 
-func (v *visitor) ConstantNode(node *ast.ConstantNode) (reflect.Type, info) {
-	return reflect.TypeOf(node.Value), info{}
+func (v *CheckVisitor) ConstantNode(node *ast.ConstantNode) (reflect.Type, Info) {
+	return reflect.TypeOf(node.Value), Info{}
 }
 
-func (v *visitor) UnaryNode(node *ast.UnaryNode) (reflect.Type, info) {
+func (v *CheckVisitor) UnaryNode(node *ast.UnaryNode) (reflect.Type, Info) {
 	t, _ := v.visit(node.Node)
 
 	switch node.Operator {
 
 	case "!", "not":
-		if isBool(t) {
-			return boolType, info{}
+		if IsBool(t) {
+			return BoolType, Info{}
 		}
-		if isAny(t) {
-			return boolType, info{}
+		if IsAny(t) {
+			return BoolType, Info{}
 		}
 
 	case "+", "-":
-		if isNumber(t) {
-			return t, info{}
+		if IsNumber(t) {
+			return t, Info{}
 		}
-		if isAny(t) {
-			return anyType, info{}
+		if IsAny(t) {
+			return AnyType, Info{}
 		}
 
 	default:
@@ -196,7 +213,7 @@ func (v *visitor) UnaryNode(node *ast.UnaryNode) (reflect.Type, info) {
 	return v.error(node, `invalid operation: %v (mismatched type %v)`, node.Operator, t)
 }
 
-func (v *visitor) BinaryNode(node *ast.BinaryNode) (reflect.Type, info) {
+func (v *CheckVisitor) BinaryNode(node *ast.BinaryNode) (reflect.Type, Info) {
 	l, _ := v.visit(node.Left)
 	r, _ := v.visit(node.Right)
 
@@ -204,114 +221,114 @@ func (v *visitor) BinaryNode(node *ast.BinaryNode) (reflect.Type, info) {
 	if fns, ok := v.config.Operators[node.Operator]; ok {
 		t, _, ok := conf.FindSuitableOperatorOverload(fns, v.config.Types, l, r)
 		if ok {
-			return t, info{}
+			return t, Info{}
 		}
 	}
 
 	switch node.Operator {
 	case "==", "!=":
-		if isNumber(l) && isNumber(r) {
-			return boolType, info{}
+		if IsNumber(l) && IsNumber(r) {
+			return BoolType, Info{}
 		}
 		if l == nil || r == nil { // It is possible to compare with nil.
-			return boolType, info{}
+			return BoolType, Info{}
 		}
 		if l.Kind() == r.Kind() {
-			return boolType, info{}
+			return BoolType, Info{}
 		}
-		if isAny(l) || isAny(r) {
-			return boolType, info{}
+		if IsAny(l) || IsAny(r) {
+			return BoolType, Info{}
 		}
 
 	case "or", "||", "and", "&&":
-		if isBool(l) && isBool(r) {
-			return boolType, info{}
+		if IsBool(l) && IsBool(r) {
+			return BoolType, Info{}
 		}
-		if or(l, r, isBool) {
-			return boolType, info{}
+		if DualAnyOf(l, r, IsBool) {
+			return BoolType, Info{}
 		}
 
 	case "<", ">", ">=", "<=":
-		if isNumber(l) && isNumber(r) {
-			return boolType, info{}
+		if IsNumber(l) && IsNumber(r) {
+			return BoolType, Info{}
 		}
-		if isString(l) && isString(r) {
-			return boolType, info{}
+		if IsString(l) && IsString(r) {
+			return BoolType, Info{}
 		}
-		if isTime(l) && isTime(r) {
-			return boolType, info{}
+		if IsTime(l) && IsTime(r) {
+			return BoolType, Info{}
 		}
-		if or(l, r, isNumber, isString, isTime) {
-			return boolType, info{}
+		if DualAnyOf(l, r, IsNumber, IsString, IsTime) {
+			return BoolType, Info{}
 		}
 
 	case "-":
-		if isNumber(l) && isNumber(r) {
-			return combined(l, r), info{}
+		if IsNumber(l) && IsNumber(r) {
+			return ToNumbertype(l, r), Info{}
 		}
-		if isTime(l) && isTime(r) {
-			return durationType, info{}
+		if IsTime(l) && IsTime(r) {
+			return DurationType, Info{}
 		}
-		if or(l, r, isNumber, isTime) {
-			return anyType, info{}
+		if DualAnyOf(l, r, IsNumber, IsTime) {
+			return AnyType, Info{}
 		}
 
 	case "/", "*":
-		if isNumber(l) && isNumber(r) {
-			return combined(l, r), info{}
+		if IsNumber(l) && IsNumber(r) {
+			return ToNumbertype(l, r), Info{}
 		}
-		if or(l, r, isNumber) {
-			return anyType, info{}
+		if DualAnyOf(l, r, IsNumber) {
+			return AnyType, Info{}
 		}
 
 	case "**", "^":
-		if isNumber(l) && isNumber(r) {
-			return floatType, info{}
+		if IsNumber(l) && IsNumber(r) {
+			return FloatType, Info{}
 		}
-		if or(l, r, isNumber) {
-			return floatType, info{}
+		if DualAnyOf(l, r, IsNumber) {
+			return FloatType, Info{}
 		}
 
 	case "%":
-		if isInteger(l) && isInteger(r) {
-			return combined(l, r), info{}
+		if IsInteger(l) && IsInteger(r) {
+			return ToNumbertype(l, r), Info{}
 		}
-		if or(l, r, isInteger) {
-			return anyType, info{}
+		if DualAnyOf(l, r, IsInteger) {
+			return AnyType, Info{}
 		}
 
 	case "+":
-		if isNumber(l) && isNumber(r) {
-			return combined(l, r), info{}
+		if IsNumber(l) && IsNumber(r) {
+			return ToNumbertype(l, r), Info{}
 		}
-		if isString(l) && isString(r) {
-			return stringType, info{}
+		if IsString(l) && IsString(r) {
+			return StringType, Info{}
 		}
-		if isTime(l) && isDuration(r) {
-			return timeType, info{}
+		if IsTime(l) && IsDuration(r) {
+			return TimeType, Info{}
 		}
-		if isDuration(l) && isTime(r) {
-			return timeType, info{}
+		if IsDuration(l) && IsTime(r) {
+			return TimeType, Info{}
 		}
-		if or(l, r, isNumber, isString, isTime, isDuration) {
-			return anyType, info{}
+		if DualAnyOf(l, r, IsNumber, IsString, IsTime, IsDuration) {
+			return AnyType, Info{}
 		}
 
 	case "in":
-		if (isString(l) || isAny(l)) && isStruct(r) {
-			return boolType, info{}
+		if (IsString(l) || IsAny(l)) && IsStruct(r) {
+			return BoolType, Info{}
 		}
-		if isMap(r) {
-			return boolType, info{}
+		if IsMap(r) {
+			return BoolType, Info{}
 		}
-		if isArray(r) {
-			return boolType, info{}
+		if IsArray(r) {
+			return BoolType, Info{}
 		}
-		if isAny(l) && anyOf(r, isString, isArray, isMap) {
-			return boolType, info{}
+		if IsAny(l) && MatchesAny(r, IsString, IsArray, IsMap) {
+			return BoolType, Info{}
 		}
-		if isAny(l) && isAny(r) {
-			return boolType, info{}
+		if IsAny(l) && IsAny(r) {
+			return BoolType, Info{}
 		}
 
 	case "matches":
@@ -322,28 +339,28 @@ func (v *visitor) BinaryNode(node *ast.BinaryNode) (reflect.Type, info) {
 			}
 			node.Regexp = r
 		}
-		if isString(l) && isString(r) {
-			return boolType, info{}
+		if IsString(l) && IsString(r) {
+			return BoolType, Info{}
 		}
-		if or(l, r, isString) {
-			return boolType, info{}
+		if DualAnyOf(l, r, IsString) {
+			return BoolType, Info{}
 		}
 
 	case "contains", "startsWith", "endsWith":
-		if isString(l) && isString(r) {
-			return boolType, info{}
+		if IsString(l) && IsString(r) {
+			return BoolType, Info{}
 		}
-		if or(l, r, isString) {
-			return boolType, info{}
+		if DualAnyOf(l, r, IsString) {
+			return BoolType, Info{}
 		}
 
 	case "..":
-		ret := reflect.SliceOf(integerType)
-		if isInteger(l) && isInteger(r) {
-			return ret, info{}
+		ret := reflect.SliceOf(IntegerType)
+		if IsInteger(l) && IsInteger(r) {
+			return ret, Info{}
 		}
-		if or(l, r, isInteger) {
-			return ret, info{}
+		if DualAnyOf(l, r, IsInteger) {
+			return ret, Info{}
 		}
 
 	default:
@@ -354,11 +371,11 @@ func (v *visitor) BinaryNode(node *ast.BinaryNode) (reflect.Type, info) {
 	return v.error(node, `invalid operation: %v (mismatched types %v and %v)`, node.Operator, l, r)
 }
 
-func (v *visitor) ChainNode(node *ast.ChainNode) (reflect.Type, info) {
+func (v *CheckVisitor) ChainNode(node *ast.ChainNode) (reflect.Type, Info) {
 	return v.visit(node.Node)
 }
 
-func (v *visitor) MemberNode(node *ast.MemberNode) (reflect.Type, info) {
+func (v *CheckVisitor) MemberNode(node *ast.MemberNode) (reflect.Type, Info) {
 	base, _ := v.visit(node.Node)
 	prop, _ := v.visit(node.Property)
 
@@ -376,9 +393,9 @@ func (v *visitor) MemberNode(node *ast.MemberNode) (reflect.Type, info) {
 				// In case of interface type method will not have a receiver,
 				// and to prevent checker decreasing numbers of in arguments
 				// return method type as not method (second argument is false).
-				return m.Type, info{}
+				return m.Type, Info{}
 			} else {
-				return m.Type, info{method: true}
+				return m.Type, Info{Method: true}
 			}
 		}
 	}
@@ -390,33 +407,33 @@ func (v *visitor) MemberNode(node *ast.MemberNode) (reflect.Type, info) {
 	switch base.Kind() {
 	case reflect.Interface:
 		node.Deref = true
-		return anyType, info{}
+		return AnyType, Info{}
 
 	case reflect.Map:
 		if !prop.AssignableTo(base.Key()) {
 			return v.error(node.Property, "cannot use %v to get an element from %v", prop, base)
 		}
-		t, c := deref(base.Elem())
+		t, c := Deref(base.Elem())
 		node.Deref = c
-		return t, info{}
+		return t, Info{}
 
 	case reflect.Array, reflect.Slice:
-		if !isInteger(prop) && !isAny(prop) {
+		if !IsInteger(prop) && !IsAny(prop) {
 			return v.error(node.Property, "array elements can only be selected using an integer (got %v)", prop)
 		}
-		t, c := deref(base.Elem())
+		t, c := Deref(base.Elem())
 		node.Deref = c
-		return t, info{}
+		return t, Info{}
 
 	case reflect.Struct:
 		if name, ok := node.Property.(*ast.StringNode); ok {
 			propertyName := name.Value
-			if field, ok := fetchField(base, propertyName); ok {
-				t, c := deref(field.Type)
+			if field, ok := FetchField(base, propertyName); ok {
+				t, c := Deref(field.Type)
 				node.Deref = c
 				node.FieldIndex = field.Index
 				node.Name = propertyName
-				return t, info{}
+				return t, Info{}
 			}
 			if len(v.parents) > 1 {
 				if _, ok := v.parents[len(v.parents)-2].(*ast.CallNode); ok {
@@ -430,7 +447,7 @@ func (v *visitor) MemberNode(node *ast.MemberNode) (reflect.Type, info) {
 	return v.error(node, "type %v[%v] is undefined", base, prop)
 }
 
-func (v *visitor) SliceNode(node *ast.SliceNode) (reflect.Type, info) {
+func (v *CheckVisitor) SliceNode(node *ast.SliceNode) (reflect.Type, Info) {
 	t, _ := v.visit(node.Node)
 
 	switch t.Kind() {
@@ -444,20 +461,20 @@ func (v *visitor) SliceNode(node *ast.SliceNode) (reflect.Type, info) {
 
 	if node.From != nil {
 		from, _ := v.visit(node.From)
-		if !isInteger(from) && !isAny(from) {
+		if !IsInteger(from) && !IsAny(from) {
 			return v.error(node.From, "non-integer slice index %v", from)
 		}
 	}
 	if node.To != nil {
 		to, _ := v.visit(node.To)
-		if !isInteger(to) && !isAny(to) {
+		if !IsInteger(to) && !IsAny(to) {
 			return v.error(node.To, "non-integer slice index %v", to)
 		}
 	}
-	return t, info{}
+	return t, Info{}
 }
 
-func (v *visitor) CallNode(node *ast.CallNode) (reflect.Type, info) {
+func (v *CheckVisitor) CallNode(node *ast.CallNode) (reflect.Type, Info) {
 	fn, fnInfo := v.visit(node.Callee)
 
 	fnName := "function"
@@ -472,36 +489,36 @@ func (v *visitor) CallNode(node *ast.CallNode) (reflect.Type, info) {
 
 	switch fn.Kind() {
 	case reflect.Interface:
-		return anyType, info{}
+		return AnyType, Info{}
 	case reflect.Func:
 		inputParamsCount := 1 // for functions
-		if fnInfo.method {
+		if fnInfo.Method {
 			inputParamsCount = 2 // for methods
 		}
 
-		if !isAny(fn) &&
+		if !IsAny(fn) &&
 			fn.IsVariadic() &&
 			fn.NumIn() == inputParamsCount &&
 			((fn.NumOut() == 1 && // Function with one return value
 				fn.Out(0).Kind() == reflect.Interface) ||
 				(fn.NumOut() == 2 && // Function with one return value and an error
 					fn.Out(0).Kind() == reflect.Interface &&
-					fn.Out(1) == errorType)) {
+					fn.Out(1) == ErrorType)) {
 			rest := fn.In(fn.NumIn() - 1) // function has only one param for functions and two for methods
 			if rest.Kind() == reflect.Slice && rest.Elem().Kind() == reflect.Interface {
 				node.Fast = true
 			}
 		}
 
-		return v.checkFunc(fn, fnInfo.method, node, fnName, node.Arguments)
+		return v.checkFunc(fn, fnInfo.Method, node, fnName, node.Arguments)
 	}
 	return v.error(node, "%v is not callable", fn)
 }
 
 // checkFunc checks func arguments and returns "return type" of func or method.
-func (v *visitor) checkFunc(fn reflect.Type, method bool, node *ast.CallNode, name string, arguments []ast.Node) (reflect.Type, info) {
-	if isAny(fn) {
-		return anyType, info{}
+func (v *CheckVisitor) checkFunc(fn reflect.Type, method bool, node *ast.CallNode, name string, arguments []ast.Node) (reflect.Type, Info) {
+	if IsAny(fn) {
+		return AnyType, Info{}
 	}
 
 	if fn.NumOut() == 0 {
@@ -551,9 +568,9 @@ func (v *visitor) checkFunc(fn reflect.Type, method bool, node *ast.CallNode, na
 			in = fn.In(i + offset)
 		}
 
-		if isIntegerOrArithmeticOperation(arg) {
+		if IsIntegerOrArithmeticOperation(arg) {
 			t = in
-			setTypeForIntegers(arg, t)
+			SetTypeForIntegers(arg, t)
 		}
 
 		if t == nil {
@@ -595,30 +612,25 @@ func (v *visitor) checkFunc(fn reflect.Type, method bool, node *ast.CallNode, na
 		}
 	}
 
-	return fn.Out(0), info{}
+	return fn.Out(0), Info{}
 }
 
-func (v *visitor) BuiltinNode(node *ast.BuiltinNode) (reflect.Type, info) {
-	if space, ok := namespaces[node.Namespace]; ok {
-		if fun, ok := space.members[node.Name]; ok {
-			return fun(v, node)
+func (v *CheckVisitor) BuiltinNode(node *ast.BuiltinNode) (reflect.Type, Info) {
+	space, ok := namespaces.Get(node.Namespace)
 
-		} else if space.check != nil {
-			return space.check(v, node)
-
-		}
-		return v.error(node, "there is no %s in builtin namespace %s", node.Name, node.Namespace)
-
+	if !ok {
+		return v.error(node, "there is no builtin namespace %s", node.Namespace)
 	}
-	return v.error(node, "there is no builtin namespace %s", node.Namespace)
+
+	return space.Check(v.ex, node)
 }
 
-func (v *visitor) ClosureNode(node *ast.ClosureNode) (reflect.Type, info) {
+func (v *CheckVisitor) ClosureNode(node *ast.ClosureNode) (reflect.Type, Info) {
 	t, _ := v.visit(node.Node)
-	return reflect.FuncOf([]reflect.Type{anyType}, []reflect.Type{t}, false), info{}
+	return reflect.FuncOf([]reflect.Type{AnyType}, []reflect.Type{t}, false), Info{}
 }
 
-func (v *visitor) PointerNode(node *ast.PointerNode) (reflect.Type, info) {
+func (v *CheckVisitor) PointerNode(node *ast.PointerNode) (reflect.Type, Info) {
 	if len(v.collections) == 0 {
 		return v.error(node, "cannot use pointer accessor outside closure")
 	}
@@ -626,16 +638,16 @@ func (v *visitor) PointerNode(node *ast.PointerNode) (reflect.Type, info) {
 	collection := v.collections[len(v.collections)-1]
 	switch collection.Kind() {
 	case reflect.Interface:
-		return anyType, info{}
+		return AnyType, Info{}
 	case reflect.Array, reflect.Slice:
-		return collection.Elem(), info{}
+		return collection.Elem(), Info{}
 	}
 	return v.error(node, "cannot use %v as array", collection)
 }
 
-func (v *visitor) ConditionalNode(node *ast.ConditionalNode) (reflect.Type, info) {
+func (v *CheckVisitor) ConditionalNode(node *ast.ConditionalNode) (reflect.Type, Info) {
 	c, _ := v.visit(node.Cond)
-	if !isBool(c) && !isAny(c) {
+	if !IsBool(c) && !IsAny(c) {
 		return v.error(node.Cond, "non-bool expression (type %v) used as condition", c)
 	}
 
@@ -643,36 +655,36 @@ func (v *visitor) ConditionalNode(node *ast.ConditionalNode) (reflect.Type, info
 	t2, _ := v.visit(node.Exp2)
 
 	if t1 == nil && t2 != nil {
-		return t2, info{}
+		return t2, Info{}
 	}
 	if t1 != nil && t2 == nil {
-		return t1, info{}
+		return t1, Info{}
 	}
 	if t1 == nil && t2 == nil {
-		return nilType, info{}
+		return NilType, Info{}
 	}
 	if t1.AssignableTo(t2) {
-		return t1, info{}
+		return t1, Info{}
 	}
-	return anyType, info{}
+	return AnyType, Info{}
 }
 
-func (v *visitor) ArrayNode(node *ast.ArrayNode) (reflect.Type, info) {
+func (v *CheckVisitor) ArrayNode(node *ast.ArrayNode) (reflect.Type, Info) {
 	for _, node := range node.Nodes {
 		v.visit(node)
 	}
-	return arrayType, info{}
+	return ArrayType, Info{}
 }
 
-func (v *visitor) MapNode(node *ast.MapNode) (reflect.Type, info) {
+func (v *CheckVisitor) MapNode(node *ast.MapNode) (reflect.Type, Info) {
 	for _, pair := range node.Pairs {
 		v.visit(pair)
 	}
-	return mapType, info{}
+	return MapType, Info{}
 }
 
-func (v *visitor) PairNode(node *ast.PairNode) (reflect.Type, info) {
+func (v *CheckVisitor) PairNode(node *ast.PairNode) (reflect.Type, Info) {
 	v.visit(node.Key)
 	v.visit(node.Value)
-	return nilType, info{}
+	return NilType, Info{}
 }
